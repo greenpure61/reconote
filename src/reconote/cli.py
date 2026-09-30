@@ -18,6 +18,11 @@ Usage:
   Custom ports:  reconote scanme.example.com -p 1-1024
   Include UDP:   reconote 10.10.10.10 --udp
   Save report:   reconote 10.10.10.10 --top 100 -o report.md
+
+After a scan, reconote can offer to run one of its own suggested
+next-step commands for you: pick one from a numbered list, edit it if
+it has a <placeholder> to fill in, confirm, and it runs right there
+with live output. Nothing runs without that confirmation.
 """
 
 from __future__ import annotations
@@ -29,8 +34,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 
+from . import followup, scanner, udp_scanner
 from . import report as report_mod
-from . import scanner, udp_scanner
 from . import scope as scope_mod
 
 console = Console()
@@ -154,9 +159,10 @@ def interactive_menu() -> None:
         console.print(f"  3) Set engine            [dim](current: {state['engine']})[/dim]")
         console.print(f"  4) Toggle UDP scan       [dim](current: {'on' if state['udp'] else 'off'})[/dim]")
         console.print("  5) Run scan")
-        console.print("  6) Save last report")
-        console.print("  7) Quit")
-        choice = Prompt.ask("Choose an option", choices=["1", "2", "3", "4", "5", "6", "7"], default="5")
+        console.print("  6) Run a suggested command")
+        console.print("  7) Save last report")
+        console.print("  8) Quit")
+        choice = Prompt.ask("Choose an option", choices=["1", "2", "3", "4", "5", "6", "7", "8"], default="5")
 
         if choice == "1":
             state["target"] = Prompt.ask("Target (IP or hostname)").strip()
@@ -184,14 +190,23 @@ def interactive_menu() -> None:
                 state["target"], ports, state["engine"], state["timeout"], state["threads"],
                 None, state["udp"], udp_scanner.TOP_UDP_PORTS, state["scope_path"],
             )
+            if last_report["findings"] and Confirm.ask(
+                "Run one of the suggested commands now?", default=False
+            ):
+                followup.pick_and_run(last_report, console)
         elif choice == "6":
+            if not last_report:
+                console.print("[red]No report yet -- run a scan first.[/red]")
+                continue
+            followup.pick_and_run(last_report, console)
+        elif choice == "7":
             if not last_report:
                 console.print("[red]No report yet -- run a scan first.[/red]")
                 continue
             path = Prompt.ask("Save as (.md or .json)", default="reconote-report.md")
             report_mod.save_report(last_report, path)
             console.print(f"[green]Saved to {path}[/green]")
-        elif choice == "7":
+        elif choice == "8":
             console.print("Bye.")
             break
 
@@ -257,10 +272,14 @@ def main() -> None:
         console.print("[yellow]Aborted -- not authorized.[/yellow]")
         sys.exit(1)
 
-    cmd_scan_and_show(
+    rpt = cmd_scan_and_show(
         args.target, ports, args.engine, args.timeout, args.threads,
         args.output, include_udp, udp_ports, scope_path,
     )
+
+    should_offer_followup = not args.yes and rpt["findings"] and sys.stdin.isatty()
+    if should_offer_followup and Confirm.ask("Run one of the suggested commands now?", default=False):
+        followup.pick_and_run(rpt, console)
 
 
 if __name__ == "__main__":
