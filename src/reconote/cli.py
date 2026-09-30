@@ -14,10 +14,11 @@ explicit written permission to assess). Scanning systems without
 authorization is illegal in most jurisdictions.
 
 Usage:
-  Interactive:   ./reconote.py
-  Direct scan:   ./reconote.py 10.10.10.10 --top 100
-  Custom ports:  ./reconote.py scanme.example.com -p 1-1024
-  Save report:   ./reconote.py 10.10.10.10 --top 100 -o report.md
+  Interactive:   reconote
+  Direct scan:   reconote 10.10.10.10 --top 100
+  Custom ports:  reconote scanme.example.com -p 1-1024
+  Include UDP:   reconote 10.10.10.10 --udp
+  Save report:   reconote 10.10.10.10 --top 100 -o report.md
 """
 
 from __future__ import annotations
@@ -27,10 +28,11 @@ import sys
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Confirm, IntPrompt, Prompt
+from rich.prompt import Confirm, Prompt
 
-import report as report_mod
-import scanner
+from . import report as report_mod
+from . import scanner, udp_scanner
+from . import scope as scope_mod
 
 console = Console()
 
@@ -50,33 +52,75 @@ AUTH_NOTICE = (
 )
 
 
-def run_scan(target: str, ports: list[int], engine: str, timeout: float, threads: int) -> dict:
-    resolved = scanner.resolve_target(target)
-    used_engine = engine
+def _resolve_scope_path(explicit: str | None, no_check: bool) -> str | None:
+    if no_check:
+        return None
+    if explicit:
+        return explicit
+    found = scope_mod.find_default_scope_file(".")
+    return str(found) if found else None
 
+
+def run_scan(
+    target: str,
+    ports: list[int],
+    engine: str,
+    timeout: float,
+    threads: int,
+    include_udp: bool,
+    udp_ports: list[int],
+    scope_path: str | None,
+) -> dict:
+    resolved = scanner.resolve_target(target)
+
+    try:
+        scope_mod.check(resolved, scope_path)
+    except scope_mod.ScopeError as exc:
+        console.print(f"[bold red]Blocked by scope check:[/bold red] {exc}")
+        sys.exit(2)
+
+    used_engine = engine
     if engine == "auto":
         used_engine = "nmap" if scanner.nmap_available() else "socket"
-
     if used_engine == "nmap" and not scanner.nmap_available():
         console.print("[yellow]nmap not found on this system, falling back to the built-in scanner.[/yellow]")
         used_engine = "socket"
 
-    console.print(f"[dim]Scanning {target} ({resolved}) -- {len(ports)} ports -- engine: {used_engine}[/dim]")
+    console.print(f"[dim]Scanning {target} ({resolved}) -- {len(ports)} TCP ports -- engine: {used_engine}[/dim]")
 
     if used_engine == "nmap":
         raw = scanner.nmap_scan(resolved, ports)
     else:
-        with console.status(f"[cyan]Scanning...[/cyan]") as status:
+        with console.status("[cyan]Scanning TCP...[/cyan]") as status:
             def progress(done, total):
-                status.update(f"[cyan]Scanning... {done}/{total} ports checked[/cyan]")
+                status.update(f"[cyan]Scanning TCP... {done}/{total} ports checked[/cyan]")
             raw = scanner.socket_scan(resolved, ports, timeout=timeout, threads=threads, progress_cb=progress)
 
-    return report_mod.annotate(target, raw, used_engine)
+    all_results = list(raw.values())
+
+    if include_udp:
+        console.print(f"[dim]Scanning {target} ({resolved}) -- {len(udp_ports)} UDP ports[/dim]")
+        with console.status("[cyan]Scanning UDP...[/cyan]") as status:
+            def progress(done, total):
+                status.update(f"[cyan]Scanning UDP... {done}/{total} ports checked[/cyan]")
+            udp_raw = udp_scanner.udp_scan(resolved, udp_ports, progress_cb=progress)
+        all_results.extend(udp_raw.values())
+
+    return report_mod.annotate(target, all_results, used_engine)
 
 
-def cmd_scan_and_show(target: str, ports: list[int], engine: str, timeout: float,
-                       threads: int, out_path: str | None) -> dict:
-    rpt = run_scan(target, ports, engine, timeout, threads)
+def cmd_scan_and_show(
+    target: str,
+    ports: list[int],
+    engine: str,
+    timeout: float,
+    threads: int,
+    out_path: str | None,
+    include_udp: bool,
+    udp_ports: list[int],
+    scope_path: str | None,
+) -> dict:
+    rpt = run_scan(target, ports, engine, timeout, threads, include_udp, udp_ports, scope_path)
     report_mod.render_console(rpt, console)
     if out_path:
         report_mod.save_report(rpt, out_path)
@@ -88,12 +132,18 @@ def interactive_menu() -> None:
     console.print(BANNER)
     console.print(Panel(AUTH_NOTICE, border_style="red"))
 
+    default_scope = scope_mod.find_default_scope_file(".")
+    if default_scope:
+        console.print(f"[dim]Scope file detected: {default_scope} -- out-of-scope targets will be blocked.[/dim]")
+
     state = {
         "target": "",
         "port_spec": "top100",
         "engine": "auto",
         "timeout": 1.0,
         "threads": 100,
+        "udp": False,
+        "scope_path": str(default_scope) if default_scope else None,
     }
     last_report: dict | None = None
 
@@ -103,10 +153,11 @@ def interactive_menu() -> None:
         console.print(f"  1) Set target            [dim](current: {state['target'] or 'not set'})[/dim]")
         console.print(f"  2) Set ports             [dim](current: {state['port_spec']})[/dim]")
         console.print(f"  3) Set engine            [dim](current: {state['engine']})[/dim]")
-        console.print(f"  4) Run scan")
-        console.print(f"  5) Save last report")
-        console.print(f"  6) Quit")
-        choice = Prompt.ask("Choose an option", choices=["1", "2", "3", "4", "5", "6"], default="4")
+        console.print(f"  4) Toggle UDP scan       [dim](current: {'on' if state['udp'] else 'off'})[/dim]")
+        console.print("  5) Run scan")
+        console.print("  6) Save last report")
+        console.print("  7) Quit")
+        choice = Prompt.ask("Choose an option", choices=["1", "2", "3", "4", "5", "6", "7"], default="5")
 
         if choice == "1":
             state["target"] = Prompt.ask("Target (IP or hostname)").strip()
@@ -116,6 +167,8 @@ def interactive_menu() -> None:
         elif choice == "3":
             state["engine"] = Prompt.ask("Engine", choices=["auto", "socket", "nmap"], default=state["engine"])
         elif choice == "4":
+            state["udp"] = not state["udp"]
+        elif choice == "5":
             if not state["target"]:
                 console.print("[red]Set a target first (option 1).[/red]")
                 continue
@@ -129,16 +182,17 @@ def interactive_menu() -> None:
                 console.print("[yellow]Skipped -- not authorized.[/yellow]")
                 continue
             last_report = cmd_scan_and_show(
-                state["target"], ports, state["engine"], state["timeout"], state["threads"], None
+                state["target"], ports, state["engine"], state["timeout"], state["threads"],
+                None, state["udp"], udp_scanner.TOP_UDP_PORTS, state["scope_path"],
             )
-        elif choice == "5":
+        elif choice == "6":
             if not last_report:
                 console.print("[red]No report yet -- run a scan first.[/red]")
                 continue
             path = Prompt.ask("Save as (.md or .json)", default="reconote-report.md")
             report_mod.save_report(last_report, path)
             console.print(f"[green]Saved to {path}[/green]")
-        elif choice == "6":
+        elif choice == "7":
             console.print("Bye.")
             break
 
@@ -164,13 +218,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("target", nargs="?", help="IP or hostname to scan. Omit to launch the interactive menu.")
     p.add_argument("-p", "--ports", default=None, help="Port spec, e.g. '22,80,1000-2000'. Overrides --top.")
-    p.add_argument("--top", type=int, default=100, choices=[100, 1000], help="Scan the top N common ports (default 100).")
-    p.add_argument("--all-ports", action="store_true", help="Scan all 65535 ports (slow).")
-    p.add_argument("--engine", choices=["auto", "socket", "nmap"], default="auto", help="Scan engine (default: auto-detect nmap).")
+    p.add_argument("--top", type=int, default=100, choices=[100, 1000], help="Scan the top N common TCP ports (default 100).")
+    p.add_argument("--all-ports", action="store_true", help="Scan all 65535 TCP ports (slow).")
+    p.add_argument("--udp", action="store_true", help="Also scan common UDP ports (SNMP, DNS, NTP, NetBIOS, etc).")
+    p.add_argument("--udp-ports", default=None, help="Custom UDP port spec, e.g. '53,161,500-520'. Implies --udp.")
+    p.add_argument("--engine", choices=["auto", "socket", "nmap"], default="auto", help="TCP scan engine (default: auto-detect nmap).")
     p.add_argument("--timeout", type=float, default=1.0, help="Per-port connect timeout in seconds (socket engine).")
     p.add_argument("--threads", type=int, default=100, help="Concurrent threads (socket engine).")
     p.add_argument("-o", "--output", default=None, help="Save the annotated report to a file (.md or .json).")
     p.add_argument("-y", "--yes", action="store_true", help="Skip the authorization confirmation prompt.")
+    p.add_argument("--scope", default=None, help="Path to a scope allowlist file (default: auto-detect scope.txt).")
+    p.add_argument("--no-scope-check", action="store_true", help="Bypass the scope allowlist check (not recommended).")
     return p
 
 
@@ -190,12 +248,20 @@ def main() -> None:
     else:
         ports = scanner.TOP_100_PORTS
 
+    include_udp = args.udp or bool(args.udp_ports)
+    udp_ports = scanner.parse_ports(args.udp_ports) if args.udp_ports else udp_scanner.TOP_UDP_PORTS
+
+    scope_path = _resolve_scope_path(args.scope, args.no_scope_check)
+
     console.print(Panel(AUTH_NOTICE, border_style="red"))
     if not args.yes and not Confirm.ask(f"Confirm: you are authorized to scan '{args.target}'?", default=True):
         console.print("[yellow]Aborted -- not authorized.[/yellow]")
         sys.exit(1)
 
-    cmd_scan_and_show(args.target, ports, args.engine, args.timeout, args.threads, args.output)
+    cmd_scan_and_show(
+        args.target, ports, args.engine, args.timeout, args.threads,
+        args.output, include_udp, udp_ports, scope_path,
+    )
 
 
 if __name__ == "__main__":

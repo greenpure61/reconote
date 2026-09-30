@@ -1,5 +1,5 @@
 """
-scanner.py -- scan engines for reconote.
+scanner.py -- TCP scan engines for reconote.
 
 Two engines:
   - "socket": pure-python multithreaded TCP connect scan + banner grab.
@@ -8,8 +8,10 @@ Two engines:
     nmap binary is present. Gives better service/version detection.
 
 Both return the same normalized structure:
-  {host: {port: {"state": "open", "service": str, "product": str,
-                 "version": str, "banner": str}}}
+  {port: {"state": "open", "protocol": "tcp", "service": str,
+          "product": str, "version": str, "banner": str}}
+
+See udp_scanner.py for the UDP side.
 """
 
 from __future__ import annotations
@@ -18,8 +20,8 @@ import shutil
 import socket
 import subprocess
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Callable, Optional
 
 TOP_100_PORTS = [
     7, 9, 13, 21, 22, 23, 25, 26, 37, 53, 79, 80, 81, 88, 106, 110, 111, 113,
@@ -48,11 +50,11 @@ def _grab_banner(sock: socket.socket, port: int) -> str:
         sock.settimeout(1.5)
         data = sock.recv(256)
         return data.decode(errors="replace").strip().split("\n")[0][:120]
-    except Exception:
+    except OSError:
         return ""
 
 
-def _scan_one_port(host: str, port: int, timeout: float) -> Optional[dict]:
+def _scan_one_port(host: str, port: int, timeout: float) -> dict | None:
     try:
         with socket.create_connection((host, port), timeout=timeout) as sock:
             banner = _grab_banner(sock, port)
@@ -63,12 +65,13 @@ def _scan_one_port(host: str, port: int, timeout: float) -> Optional[dict]:
             return {
                 "port": port,
                 "state": "open",
+                "protocol": "tcp",
                 "service": service,
                 "product": "",
                 "version": "",
                 "banner": banner,
             }
-    except Exception:
+    except OSError:
         return None
 
 
@@ -77,7 +80,7 @@ def socket_scan(
     ports: list[int],
     timeout: float = 1.0,
     threads: int = 100,
-    progress_cb: Optional[Callable[[int, int], None]] = None,
+    progress_cb: Callable[[int, int], None] | None = None,
 ) -> dict:
     """Pure-python multithreaded TCP connect scan. Returns {port: info}."""
     results: dict[int, dict] = {}
@@ -99,13 +102,13 @@ def nmap_available() -> bool:
     return shutil.which("nmap") is not None
 
 
-def nmap_scan(host: str, ports: list[int], extra_args: Optional[list[str]] = None) -> dict:
+def nmap_scan(host: str, ports: list[int], extra_args: list[str] | None = None) -> dict:
     """Run nmap -sV against a port list and parse the XML output."""
     port_spec = ",".join(str(p) for p in ports)
     cmd = ["nmap", "-sV", "-Pn", "-p", port_spec, "-oX", "-", host]
     if extra_args:
         cmd.extend(extra_args)
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600, check=False)
     results: dict[int, dict] = {}
     if proc.returncode not in (0,) or not proc.stdout.strip():
         return results
@@ -129,6 +132,7 @@ def nmap_scan(host: str, ports: list[int], extra_args: Optional[list[str]] = Non
             results[portid] = {
                 "port": portid,
                 "state": "open",
+                "protocol": "tcp",
                 "service": service,
                 "product": product,
                 "version": version,

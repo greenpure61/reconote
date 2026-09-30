@@ -1,0 +1,14 @@
+# Copy this file to scope.txt (or .reconote-scope.txt) in the directory
+# you run reconote from, and reconote will refuse to scan anything
+# outside the ranges listed here.
+#
+# One CIDR or bare IP per line. '#' starts a comment. Blank lines ignored.
+#
+# Example -- a TryHackMe/HTB-style lab network:
+10.10.10.0/24
+
+# Example -- a single lab VM:
+# 192.168.56.10
+
+# scope.txt itself is gitignored so you don't accidentally commit a
+# real engagement's target list.

@@ -3,6 +3,14 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
 reconote-report.*
 *.report.md
 *.report.json
+
+# Real scope files are per-engagement and should never be committed.
+scope.txt
+.reconote-scope.txt
