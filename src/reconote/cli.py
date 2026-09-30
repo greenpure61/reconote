@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 reconote -- a small nmap-ish CLI recon tool for CTFs, TryHackMe, and
 authorized/closed lab environments.
