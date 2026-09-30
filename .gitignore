@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+reconote-report.*
+*.report.md
+*.report.json
